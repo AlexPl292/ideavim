@@ -25,10 +25,12 @@ import com.intellij.openapi.fileEditor.FileEditorManagerEvent;
 import com.intellij.openapi.fileEditor.TextEditor;
 import com.intellij.openapi.fileEditor.impl.EditorTabbedContainer;
 import com.intellij.openapi.fileEditor.impl.EditorWindow;
+import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.vfs.VirtualFileManager;
 import com.intellij.openapi.vfs.VirtualFileSystem;
+import com.intellij.util.containers.ContainerUtil;
 import com.maddyhome.idea.vim.KeyHandler;
 import com.maddyhome.idea.vim.VimPlugin;
 import com.maddyhome.idea.vim.command.*;
@@ -51,7 +53,9 @@ import org.jetbrains.annotations.Nullable;
 
 import java.awt.*;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.List;
 
 import static com.maddyhome.idea.vim.group.ChangeGroup.*;
 
@@ -277,6 +281,19 @@ public class MotionGroup {
     return EditorHelper.normalizeScrollOffset(editor, scrollOffset);
   }
 
+
+  private static class RemovedInlay {
+    int offset;
+    EditorCustomElementRenderer renderer;
+
+    public RemovedInlay(int offset, EditorCustomElementRenderer renderer) {
+      this.offset = offset;
+      this.renderer = renderer;
+    }
+  }
+
+  public static List<RemovedInlay> myRemovedInlays = ContainerUtil.createLockFreeCopyOnWriteList();
+
   public static void moveCaret(@NotNull Editor editor, @NotNull Caret caret, int offset) {
     if (offset < 0 || offset > editor.getDocument().getTextLength() || !caret.isValid()) return;
 
@@ -285,6 +302,32 @@ public class MotionGroup {
       Caret primaryCaret = editor.getCaretModel().getPrimaryCaret();
       UserDataManager.setVimLastColumn(primaryCaret, primaryCaret.getVisualPosition().column);
       scrollCaretIntoView(editor);
+
+
+      if (CommandStateHelper.inBlockSubMode(editor)) {
+        editor.getCaretModel().runForEachCaret(localCaret -> {
+          int endOffset = localCaret.getOffset() + 1;
+          int startOffset = EditorHelper.getLineStartForOffset(editor, endOffset);
+          List<Inlay> inlays = editor.getInlayModel().getInlineElementsInRange(startOffset, endOffset);
+          for (Inlay inlay : inlays) {
+            myRemovedInlays.add(new RemovedInlay(inlay.getOffset(), inlay.getRenderer()));
+            Disposer.dispose(inlay);
+          }
+
+          int ll = localCaret.getLogicalPosition().line;
+          for (RemovedInlay removedInlay : myRemovedInlays) {
+            int inlayLine = editor.offsetToLogicalPosition(removedInlay.offset).line;
+            if (ll == inlayLine && removedInlay.offset > endOffset) {
+              editor.getInlayModel().addInlineElement(removedInlay.offset, removedInlay.renderer);
+              myRemovedInlays.remove(removedInlay);
+            }
+          }
+        });
+      }
+
+
+
+
       return;
     }
 
